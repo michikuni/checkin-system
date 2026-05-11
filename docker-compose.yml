@@ -1,0 +1,68 @@
+version: '3.9'
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: checkin_mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - checkin_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: checkin_backend
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      MONGODB_URI: mongodb://mongodb:27017/checkin_system
+      JWT_SECRET: ${JWT_SECRET}
+      QR_CHECKIN_SECRET: ${QR_CHECKIN_SECRET}
+      QR_REGISTER_SECRET: ${QR_REGISTER_SECRET}
+      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-Office Checkin}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-checkin.office.local}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-https://checkin.office.local}
+    volumes:
+      - ./certs:/app/certs:ro
+    networks:
+      - checkin_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ""
+    container_name: checkin_frontend
+    restart: unless-stopped
+    networks:
+      - checkin_net
+
+  nginx:
+    image: nginx:alpine
+    container_name: checkin_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - checkin_net
+
+volumes:
+  mongo_data:
+
+networks:
+  checkin_net:
+    driver: bridge
