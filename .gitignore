@@ -1,6 +1,0 @@
-node_modules/
-.env
-certs/
-dist/
-.DS_Store
-*.log
