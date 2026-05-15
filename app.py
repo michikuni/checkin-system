@@ -7,6 +7,7 @@ import time
 from collections.abc import Mapping
 from datetime import date
 from enum import Enum
+from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, render_template, request, jsonify
@@ -25,34 +26,14 @@ from fido2.utils import websafe_encode
 app = Flask(__name__)
 sock = Sock(app)
 
-# HTTPS DOMAIN
-PUBLIC_DOMAIN = os.getenv(
-    "RP_ID",
-    "missed-wit-kyle-musicians.trycloudflare.com"
-).strip()
+DEFAULT_PORT = 5000
 
-if PUBLIC_DOMAIN.startswith(("http://", "https://")):
-    PUBLIC_DOMAIN = urlparse(PUBLIC_DOMAIN).netloc
-
-RP_ID = PUBLIC_DOMAIN.strip().strip("/")
-ORIGIN = f"https://{RP_ID}"
-
-rp = PublicKeyCredentialRpEntity(
-    id=RP_ID,
-    name="Passkey Demo"
-)
-
-server = Fido2Server(rp)
-
-users = {}
-sessions = {}
-sockets = {}
 
 def get_server_private_ip():
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            ip = ipaddress.ip_address(sock.getsockname()[0])
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_sock:
+            udp_sock.connect(("8.8.8.8", 80))
+            ip = ipaddress.ip_address(udp_sock.getsockname()[0])
 
             if ip.version == 4 and ip.is_private:
                 return ip
@@ -69,6 +50,74 @@ def get_server_private_ip():
         pass
 
     return None
+
+
+def normalize_host(value):
+    value = str(value or "").strip()
+
+    if not value:
+        return ""
+
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    host = parsed.hostname or value
+    return host.strip().strip("[]").strip("/")
+
+
+def normalize_origin(value):
+    value = str(value or "").strip().rstrip("/")
+    parsed = urlparse(value)
+
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("APP_ORIGIN phai co dang https://host[:port]")
+
+    return value
+
+
+def get_app_port():
+    return int(os.getenv("APP_PORT", os.getenv("PORT", str(DEFAULT_PORT))))
+
+
+def get_default_app_host():
+    return str(get_server_private_ip() or "localhost")
+
+
+APP_PORT = get_app_port()
+APP_SCHEME = os.getenv("APP_SCHEME", "https").strip().rstrip(":/").lower()
+configured_origin = os.getenv("APP_ORIGIN") or os.getenv("ORIGIN")
+APP_HOST = normalize_host(
+    os.getenv("APP_HOST")
+    or os.getenv("PUBLIC_DOMAIN")
+    or os.getenv("RP_ID")
+    or configured_origin
+    or get_default_app_host()
+)
+RP_ID = normalize_host(os.getenv("RP_ID") or APP_HOST)
+APP_DEBUG = os.getenv("APP_DEBUG", "1").strip() != "0"
+
+if configured_origin:
+    ORIGIN = normalize_origin(configured_origin)
+else:
+    uses_default_port = (
+        (APP_SCHEME == "https" and APP_PORT == 443)
+        or (APP_SCHEME == "http" and APP_PORT == 80)
+    )
+    port_suffix = "" if uses_default_port else f":{APP_PORT}"
+    ORIGIN = f"{APP_SCHEME}://{APP_HOST}{port_suffix}"
+
+TLS_CERT_FILE = Path(os.getenv("TLS_CERT_FILE", "certs/local-server.crt"))
+TLS_KEY_FILE = Path(os.getenv("TLS_KEY_FILE", "certs/local-server.key"))
+
+rp = PublicKeyCredentialRpEntity(
+    id=RP_ID,
+    name="Passkey Demo"
+)
+
+server = Fido2Server(rp)
+
+users = {}
+sessions = {}
+sockets = {}
+
 
 def get_lan_networks():
     configured_cidr = os.getenv("LAN_CIDR", "").strip()
@@ -167,10 +216,19 @@ def index():
 
 @app.route("/api/network")
 def api_network():
+    server_private_ip = get_server_private_ip()
+
     return jsonify({
+        "app_host": APP_HOST,
+        "app_origin": ORIGIN,
+        "app_port": APP_PORT,
+        "debug": APP_DEBUG,
+        "rp_id": RP_ID,
         "require_same_lan": REQUIRE_SAME_LAN,
         "lan_networks": [str(network) for network in LAN_NETWORKS],
-        "detected_server_private_ip": str(get_server_private_ip()) if get_server_private_ip() else None
+        "detected_server_private_ip": str(server_private_ip) if server_private_ip else None,
+        "tls_cert_file": str(TLS_CERT_FILE),
+        "tls_key_file": str(TLS_KEY_FILE),
     })
 
 @app.route("/api/users")
@@ -417,5 +475,29 @@ def ws(ws, session_id):
     finally:
         sockets.pop(session_id, None)
 
+
+def get_ssl_context():
+    if APP_SCHEME != "https":
+        return None
+
+    if not TLS_CERT_FILE.exists() or not TLS_KEY_FILE.exists():
+        raise RuntimeError(
+            "Khong tim thay certificate local. Hay chay "
+            "`python scripts/create_local_cert.py` truoc, hoac cau hinh "
+            "TLS_CERT_FILE/TLS_KEY_FILE."
+        )
+
+    return (str(TLS_CERT_FILE), str(TLS_KEY_FILE))
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    print(f"Dashboard: {ORIGIN}/")
+    print(f"Register QR URL: {ORIGIN}/register")
+    print(f"RP ID: {RP_ID}")
+    app.run(
+        host="0.0.0.0",
+        port=APP_PORT,
+        debug=APP_DEBUG,
+        ssl_context=get_ssl_context(),
+        use_reloader=False,
+    )
